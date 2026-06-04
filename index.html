@@ -136,14 +136,43 @@
                         <div class="select-wrapper mt-2">
                             <select id="select-stratum" class="filter-select">
                                 <option value="">Todos los Estratos</option>
-                                <option value="Estrato 1">Estrato 1</option>
-                                <option value="Estrato 2">Estrato 2</option>
-                                <option value="Estrato 3">Estrato 3</option>
-                                <option value="Estrato 4">Estrato 4</option>
-                                <option value="Estrato 5">Estrato 5</option>
-                                <option value="Estrato 6">Estrato 6</option>
-                                <option value="Sin Estrato">Sin Estrato</option>
-                                <option value="No registra">No registra</option>
+                                <option value="1">Estrato 1 (Bajo-bajo)</option>
+                                <option value="2">Estrato 2 (Bajo)</option>
+                                <option value="3">Estrato 3 (Medio-bajo)</option>
+                                <option value="4">Estrato 4 (Medio)</option>
+                                <option value="5">Estrato 5 (Medio-alto)</option>
+                                <option value="6">Estrato 6 (Alto)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Socioeconomic Context Filters -->
+                    <div class="filter-group">
+                        <label class="filter-label"><i class="fa-solid fa-house-chimney-user"></i> Contexto Socioeconómico</label>
+                        <div class="select-wrapper">
+                            <select id="select-hh-size" class="filter-select" title="Filtra departamentos y municipios según el tamaño promedio del hogar de sus estudiantes">
+                                <option value="">Todos los Tamaños de Hogar</option>
+                                <option value="small">Hogar Pequeño (1–3 personas)</option>
+                                <option value="medium">Hogar Mediano (4–5 personas)</option>
+                                <option value="large">Hogar Grande (6+ personas)</option>
+                            </select>
+                        </div>
+                        <div class="select-wrapper mt-2">
+                            <select id="select-father-edu" class="filter-select" title="Filtra según el nivel educativo promedio del padre">
+                                <option value="">Educación del Padre (todos)</option>
+                                <option value="low">Sin educación / Primaria</option>
+                                <option value="secondary">Secundaria / Bachillerato</option>
+                                <option value="technical">Técnica / Tecnológica</option>
+                                <option value="university">Universitaria o más</option>
+                            </select>
+                        </div>
+                        <div class="select-wrapper mt-2">
+                            <select id="select-mother-edu" class="filter-select" title="Filtra según el nivel educativo promedio de la madre">
+                                <option value="">Educación de la Madre (todos)</option>
+                                <option value="low">Sin educación / Primaria</option>
+                                <option value="secondary">Secundaria / Bachillerato</option>
+                                <option value="technical">Técnica / Tecnológica</option>
+                                <option value="university">Universitaria o más</option>
                             </select>
                         </div>
                     </div>
@@ -413,9 +442,9 @@
                                     <div class="scatter-axis-selector">
                                         <label for="select-scatter-x" class="sr-only">Eje X</label>
                                         <select id="select-scatter-x" class="compact-select">
-                                            <option value="pct_rural">% de Colegios en Zona Rural</option>
-                                            <option value="pct_oficial">% de Colegios Oficiales (Públicos)</option>
-                                            <option value="pct_stratum12">% de Estudiantes en Estrato 1 y 2</option>
+                                            <option value="pr">% de Colegios en Zona Rural</option>
+                                            <option value="po">% de Colegios Oficiales (Públicos)</option>
+                                            <option value="ps">% de Estudiantes en Estrato 1 y 2</option>
                                         </select>
                                     </div>
                                 </div>
@@ -467,7 +496,7 @@
                                 <button class="btn-cluster-filter active" data-level="ALL">Todos</button>
                                 <button class="btn-cluster-filter" data-level="Alto"><i class="fa-solid fa-circle text-green"></i> Alto</button>
                                 <button class="btn-cluster-filter" data-level="Medio"><i class="fa-solid fa-circle text-blue"></i> Medio</button>
-                                <button class="btn-cluster-filter" data-level="Bajo"><i class="fa-solid fa-circle text-orange"></i> Vulnerable</button>
+                                <button class="btn-cluster-filter" data-level="Vulnerable"><i class="fa-solid fa-circle text-orange"></i> Vulnerable</button>
                             </div>
                             <div class="table-responsive">
                                 <table class="custom-table" id="table-cluster-departments">
@@ -479,6 +508,9 @@
                                             <th>% Colegios Oficiales</th>
                                             <th>% Colegios Rurales</th>
                                             <th>% Estratos 1 y 2</th>
+                                            <th>Tamaño Hogar Prom.</th>
+                                            <th>Educ. Padre Prom.</th>
+                                            <th>Educ. Madre Prom.</th>
                                         </tr>
                                     </thead>
                                     <tbody id="table-cluster-body">
