@@ -36,6 +36,7 @@ let charts = {};
 let rawPeriodFiles = [];
 let rawMcpioRecords = [];
 let distributionsByPeriod = {};
+let distributionsByPeriodAndDim = {};
 
 // distributionsByPeriodAndDim contiene datos desagregados por dimensión:
 // distributionsByPeriodAndDim[period][deptoName] = {
@@ -129,6 +130,10 @@ async function loadData() {
                             appData.distributions[dn] = {};
                         }
                     });
+                    // Cargar desglose por dimensión si el archivo lo provee
+                    if (data.dept_breakdowns) {
+                        distributionsByPeriodAndDim[entry.period] = data.dept_breakdowns;
+                    }
                 }
             });
             await Promise.all(promises);
@@ -418,17 +423,68 @@ function initMap() {
 function getDeptStats() {
     const stats = {};
     const dRows = filterDeptRecords();
+    const useBreakdowns = (filters.nature || filters.area || filters.gender || filters.stratum) && Object.keys(distributionsByPeriodAndDim).length > 0;
     dRows.forEach(r => {
         const dn = r[DC.depto_name];
         if (!stats[dn]) stats[dn] = { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
-        const w = r[DC.count];
-        stats[dn].cnt += w;
-        stats[dn].sg  += r[DC.avg_global]*w;
-        stats[dn].sm  += r[DC.avg_mat]*w;
-        stats[dn].sl  += r[DC.avg_lec]*w;
-        stats[dn].sc  += r[DC.avg_cna]*w;
-        stats[dn].ss  += r[DC.avg_soc]*w;
-        stats[dn].si  += r[DC.avg_ing]*w;
+
+        // Default totals from aggregated dept_records row
+        let orig_count = r[DC.count] || 0;
+        let sub_count = orig_count;
+        let sub_sg = r[DC.avg_global] * orig_count;
+        // Per-subject sums approximated by scaling by subgroup proportion when needed
+        let sub_sm = r[DC.avg_mat] * orig_count;
+        let sub_sl = r[DC.avg_lec] * orig_count;
+        let sub_sc = r[DC.avg_cna] * orig_count;
+        let sub_ss = r[DC.avg_soc] * orig_count;
+        let sub_si = r[DC.avg_ing] * orig_count;
+
+        if (useBreakdowns) {
+            // Only support a single categorical filter precisely (no cross-tab)
+            const dims = ['nature','area','gender','stratum'].filter(k => filters[k]);
+            if (dims.length === 1) {
+                const dim = dims[0];
+                const period = r[DC.periodo];
+                const perPeriod = distributionsByPeriodAndDim[period] || {};
+                const bd = perPeriod[dn];
+                if (bd) {
+                    if (dim === 'gender') {
+                        const gk = (filters.gender && filters.gender.toLowerCase().startsWith('f')) ? 'F' : 'M';
+                        const item = bd.gen && bd.gen[gk];
+                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
+                    } else if (dim === 'nature') {
+                        const nk = (filters.nature && filters.nature.toLowerCase().includes('oficial')) ? 'O' : 'P';
+                        const item = bd.nat && bd.nat[nk];
+                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
+                    } else if (dim === 'area') {
+                        const ak = (filters.area && filters.area.toLowerCase().startsWith('u')) ? 'U' : 'R';
+                        const item = bd.area && bd.area[ak];
+                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
+                    } else if (dim === 'stratum') {
+                        const sk = filters.stratum;
+                        const item = bd.str && bd.str[sk];
+                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
+                    }
+                    // Scale subject sums proportionally to subgroup when original count > 0
+                    if (orig_count > 0) {
+                        const ratio = sub_count / orig_count;
+                        sub_sm = r[DC.avg_mat] * sub_count;
+                        sub_sl = r[DC.avg_lec] * sub_count;
+                        sub_sc = r[DC.avg_cna] * sub_count;
+                        sub_ss = r[DC.avg_soc] * sub_count;
+                        sub_si = r[DC.avg_ing] * sub_count;
+                    }
+                }
+            }
+        }
+
+        stats[dn].cnt += sub_count;
+        stats[dn].sg  += sub_sg;
+        stats[dn].sm  += sub_sm;
+        stats[dn].sl  += sub_sl;
+        stats[dn].sc  += sub_sc;
+        stats[dn].ss  += sub_ss;
+        stats[dn].si  += sub_si;
     });
     const result = {};
     Object.entries(stats).forEach(([dn, s]) => {
