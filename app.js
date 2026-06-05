@@ -141,6 +141,10 @@ async function loadData() {
             bar.style.width = `${pct}%`;
         }
 
+        // Consolidar municipios cargados para que el selector municipal funcione.
+        // Antes appData.mcpio_records quedaba vacío, aunque rawMcpioRecords sí tenía datos.
+        appData.mcpio_records = rawMcpioRecords;
+
         // 4. Cargar GeoJSON georreferenciado
         bar.style.width = '80%';
         const rGeo = await fetch('colombia.geojson');
@@ -203,20 +207,24 @@ function populateFilters() {
     // ── Event listeners de filtros de características del colegio ──
     document.getElementById('select-nature').addEventListener('change', e => {
         filters.nature = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-area').addEventListener('change', e => {
         filters.area = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 
     // ── Event listeners de filtros de datos del estudiante ──
     document.getElementById('select-gender').addEventListener('change', e => {
         filters.gender = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-stratum').addEventListener('change', e => {
         filters.stratum = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 
@@ -224,14 +232,17 @@ function populateFilters() {
     // por su avg_hh_size, avg_father_edu o avg_mother_edu (rangos numéricos)
     document.getElementById('select-hh-size').addEventListener('change', e => {
         filters.hh_size = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-father-edu').addEventListener('change', e => {
         filters.father_edu = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-mother-edu').addEventListener('change', e => {
         filters.mother_edu = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 }
@@ -273,6 +284,91 @@ function clearFilters() {
 }
 
 // ─── FILTRAR DATOS ────────────────────────────────────────────────────────────
+
+// Normaliza los valores visibles del HTML a las claves usadas en dept_breakdowns.
+function getBreakdownKey(dim, value) {
+    if (!value) return '';
+    if (dim === 'gender') return value.toLowerCase().startsWith('f') ? 'F' : 'M';
+    if (dim === 'area') return value.toLowerCase().startsWith('u') ? 'U' : 'R';
+    if (dim === 'stratum') return String(value);
+    if (dim === 'nature') {
+        const v = value.toLowerCase().trim();
+        // IMPORTANTE: evaluar primero "No Oficial"; "No Oficial" también contiene la palabra "oficial".
+        if (v.startsWith('no')) return 'P';   // Privado / No oficial
+        return 'O';                           // Oficial
+    }
+    return value;
+}
+
+function getActiveCategoricalFilters() {
+    return [
+        { filterName:'nature',  dim:'nat',  key:getBreakdownKey('nature',  filters.nature)  },
+        { filterName:'area',    dim:'area', key:getBreakdownKey('area',    filters.area)    },
+        { filterName:'gender',  dim:'gen',  key:getBreakdownKey('gender',  filters.gender)  },
+        { filterName:'stratum', dim:'str',  key:getBreakdownKey('stratum', filters.stratum) }
+    ].filter(f => !!f.key);
+}
+
+function getPeriodBreakdown(period, deptoName) {
+    const per = distributionsByPeriodAndDim[period] || {};
+    return per[deptoName] || null;
+}
+
+// Calcula el subtotal departamental/periodo que corresponde a los filtros categóricos.
+// Si se activa una sola dimensión usa el subtotal real del JSON. Si se activan varias,
+// como el JSON trae marginales y no cruces (género×estrato×área...), se aplica una
+// estimación ponderada por proporciones marginales. Esto evita dejar los filtros sin efecto.
+function applyCategoricalFiltersToDeptRow(r) {
+    const origCnt = r[DC.count] || 0;
+    const base = {
+        cnt: origCnt,
+        sg: (r[DC.avg_global] || 0) * origCnt,
+        sm: (r[DC.avg_mat] || 0) * origCnt,
+        sl: (r[DC.avg_lec] || 0) * origCnt,
+        sc: (r[DC.avg_cna] || 0) * origCnt,
+        ss: (r[DC.avg_soc] || 0) * origCnt,
+        si: (r[DC.avg_ing] || 0) * origCnt
+    };
+    const active = getActiveCategoricalFilters();
+    if (!origCnt || active.length === 0) return base;
+
+    const bd = getPeriodBreakdown(r[DC.periodo], r[DC.depto_name]);
+    if (!bd) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+
+    let ratio = 1;
+    let weightedAvgGlobal = 0;
+    let weightForAvg = 0;
+
+    for (const f of active) {
+        const item = bd[f.dim] && bd[f.dim][f.key];
+        if (!item || !item.cnt) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+        const p = item.cnt / origCnt;
+        ratio *= p;
+        if (item.sg) {
+            weightedAvgGlobal += (item.sg / item.cnt) * item.cnt;
+            weightForAvg += item.cnt;
+        }
+    }
+
+    const subCnt = Math.round(origCnt * ratio);
+    if (!subCnt) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+
+    const avgGlobal = weightForAvg ? (weightedAvgGlobal / weightForAvg) : (r[DC.avg_global] || 0);
+    return {
+        cnt: subCnt,
+        sg: avgGlobal * subCnt,
+        // No hay desagregación por materia en dept_breakdowns; se conservan promedios por materia del universo filtrado.
+        sm: (r[DC.avg_mat] || 0) * subCnt,
+        sl: (r[DC.avg_lec] || 0) * subCnt,
+        sc: (r[DC.avg_cna] || 0) * subCnt,
+        ss: (r[DC.avg_soc] || 0) * subCnt,
+        si: (r[DC.avg_ing] || 0) * subCnt
+    };
+}
+
+function hasCategoricalFilters() {
+    return getActiveCategoricalFilters().length > 0;
+}
 function filterDeptRecords() {
     return appData.dept_records.filter(r => {
         const yr = Math.floor(r[DC.periodo]/10);
@@ -345,9 +441,21 @@ function filterMcpioRecords() {
             };
         }
         const a = agg[code];
-        const count = r[MC.count];
+        let count = r[MC.count];
+        let avgGlobal = r[MC.avg_global];
+
+        // Aproximación municipal: no existe breakdown municipal en el JSON; se usa la proporción
+        // departamental del mismo periodo para que género/estrato/naturaleza/área afecten el comparador.
+        if (hasCategoricalFilters()) {
+            const deptLikeRow = [r[MC.periodo], r[MC.depto_code], r[MC.depto_name], r[MC.count], r[MC.avg_global], r[MC.avg_mat], r[MC.avg_lec], r[MC.avg_cna], r[MC.avg_soc], r[MC.avg_ing], r[MC.avg_hh_size], r[MC.avg_father_edu], r[MC.avg_mother_edu]];
+            const sub = applyCategoricalFiltersToDeptRow(deptLikeRow);
+            const ratio = (r[MC.count] || 0) ? (sub.cnt / r[MC.count]) : 0;
+            count = Math.round(r[MC.count] * ratio);
+            avgGlobal = sub.cnt ? (sub.sg / sub.cnt) : 0;
+        }
+        if (!count) return;
         a.count += count;
-        a.sg += r[MC.avg_global] * count;
+        a.sg += avgGlobal * count;
         a.sm += r[MC.avg_mat] * count;
         a.sl += r[MC.avg_lec] * count;
         a.sc += r[MC.avg_cna] * count;
@@ -377,7 +485,8 @@ function filterMcpioRecords() {
 // ─── ACTUALIZAR TODO ──────────────────────────────────────────────────────────
 function updateDashboard() {
     const dRows = filterDeptRecords();
-    updateKPIs(dRows);
+    updateKPIs();
+    if (map) renderGeoLayer();
     renderNatureChart();
     renderAreaChart();
     renderStratumChart();
@@ -390,26 +499,27 @@ function updateDashboard() {
 }
 
 // ─── KPIs ─────────────────────────────────────────────────────────────────────
-function updateKPIs(rows) {
+function updateKPIs() {
+    const deptStats = getDeptStats();
     let totalCnt=0, sg=0, sm=0, sl=0, sc=0, ss=0, si=0;
-    rows.forEach(r => {
-        const w = r[DC.count];
+    Object.values(deptStats).forEach(s => {
+        const w = s.cnt || 0;
         totalCnt += w;
-        sg += r[DC.avg_global] * w;
-        sm += r[DC.avg_mat]    * w;
-        sl += r[DC.avg_lec]    * w;
-        sc += r[DC.avg_cna]    * w;
-        ss += r[DC.avg_soc]    * w;
-        si += r[DC.avg_ing]    * w;
+        sg += (s.global || 0) * w;
+        sm += (s.mat || 0) * w;
+        sl += (s.lec || 0) * w;
+        sc += (s.cna || 0) * w;
+        ss += (s.soc || 0) * w;
+        si += (s.ing || 0) * w;
     });
     const n = totalCnt || 1;
-    document.getElementById('val-kpi-evaluados').textContent = totalCnt.toLocaleString('es-CO');
-    document.getElementById('val-kpi-global').textContent    = Math.round(sg/n);
-    document.getElementById('val-kpi-mat').textContent       = (sm/n).toFixed(1);
-    document.getElementById('val-kpi-lec').textContent       = (sl/n).toFixed(1);
-    document.getElementById('val-kpi-cna').textContent       = (sc/n).toFixed(1);
-    document.getElementById('val-kpi-soc').textContent       = (ss/n).toFixed(1);
-    document.getElementById('val-kpi-ing').textContent       = (si/n).toFixed(1);
+    document.getElementById('val-kpi-evaluados').textContent = Math.round(totalCnt).toLocaleString('es-CO');
+    document.getElementById('val-kpi-global').textContent    = totalCnt ? Math.round(sg/n) : '0';
+    document.getElementById('val-kpi-mat').textContent       = totalCnt ? (sm/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-lec').textContent       = totalCnt ? (sl/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-cna').textContent       = totalCnt ? (sc/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-soc').textContent       = totalCnt ? (ss/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-ing').textContent       = totalCnt ? (si/n).toFixed(1) : '0.0';
 }
 
 // ─── MAPA ─────────────────────────────────────────────────────────────────────
@@ -423,68 +533,17 @@ function initMap() {
 function getDeptStats() {
     const stats = {};
     const dRows = filterDeptRecords();
-    const useBreakdowns = (filters.nature || filters.area || filters.gender || filters.stratum) && Object.keys(distributionsByPeriodAndDim).length > 0;
     dRows.forEach(r => {
         const dn = r[DC.depto_name];
         if (!stats[dn]) stats[dn] = { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
-
-        // Default totals from aggregated dept_records row
-        let orig_count = r[DC.count] || 0;
-        let sub_count = orig_count;
-        let sub_sg = r[DC.avg_global] * orig_count;
-        // Per-subject sums approximated by scaling by subgroup proportion when needed
-        let sub_sm = r[DC.avg_mat] * orig_count;
-        let sub_sl = r[DC.avg_lec] * orig_count;
-        let sub_sc = r[DC.avg_cna] * orig_count;
-        let sub_ss = r[DC.avg_soc] * orig_count;
-        let sub_si = r[DC.avg_ing] * orig_count;
-
-        if (useBreakdowns) {
-            // Only support a single categorical filter precisely (no cross-tab)
-            const dims = ['nature','area','gender','stratum'].filter(k => filters[k]);
-            if (dims.length === 1) {
-                const dim = dims[0];
-                const period = r[DC.periodo];
-                const perPeriod = distributionsByPeriodAndDim[period] || {};
-                const bd = perPeriod[dn];
-                if (bd) {
-                    if (dim === 'gender') {
-                        const gk = (filters.gender && filters.gender.toLowerCase().startsWith('f')) ? 'F' : 'M';
-                        const item = bd.gen && bd.gen[gk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'nature') {
-                        const nk = (filters.nature && filters.nature.toLowerCase().includes('oficial')) ? 'O' : 'P';
-                        const item = bd.nat && bd.nat[nk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'area') {
-                        const ak = (filters.area && filters.area.toLowerCase().startsWith('u')) ? 'U' : 'R';
-                        const item = bd.area && bd.area[ak];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'stratum') {
-                        const sk = filters.stratum;
-                        const item = bd.str && bd.str[sk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    }
-                    // Scale subject sums proportionally to subgroup when original count > 0
-                    if (orig_count > 0) {
-                        const ratio = sub_count / orig_count;
-                        sub_sm = r[DC.avg_mat] * sub_count;
-                        sub_sl = r[DC.avg_lec] * sub_count;
-                        sub_sc = r[DC.avg_cna] * sub_count;
-                        sub_ss = r[DC.avg_soc] * sub_count;
-                        sub_si = r[DC.avg_ing] * sub_count;
-                    }
-                }
-            }
-        }
-
-        stats[dn].cnt += sub_count;
-        stats[dn].sg  += sub_sg;
-        stats[dn].sm  += sub_sm;
-        stats[dn].sl  += sub_sl;
-        stats[dn].sc  += sub_sc;
-        stats[dn].ss  += sub_ss;
-        stats[dn].si  += sub_si;
+        const sub = applyCategoricalFiltersToDeptRow(r);
+        stats[dn].cnt += sub.cnt;
+        stats[dn].sg  += sub.sg;
+        stats[dn].sm  += sub.sm;
+        stats[dn].sl  += sub.sl;
+        stats[dn].sc  += sub.sc;
+        stats[dn].ss  += sub.ss;
+        stats[dn].si  += sub.si;
     });
     const result = {};
     Object.entries(stats).forEach(([dn, s]) => {
@@ -801,10 +860,11 @@ function renderTrend() {
     dRows.forEach(r => {
         const pd = r[DC.periodo];
         if (!byPeriod[pd]) byPeriod[pd] = {cnt:0,sg:0,sm:0,sl:0,sc:0,ss:0,si:0};
-        const w = r[DC.count];
-        byPeriod[pd].cnt+=w; byPeriod[pd].sg+=r[DC.avg_global]*w; byPeriod[pd].sm+=r[DC.avg_mat]*w;
-        byPeriod[pd].sl+=r[DC.avg_lec]*w; byPeriod[pd].sc+=r[DC.avg_cna]*w;
-        byPeriod[pd].ss+=r[DC.avg_soc]*w; byPeriod[pd].si+=r[DC.avg_ing]*w;
+        const sub = applyCategoricalFiltersToDeptRow(r);
+        const w = sub.cnt;
+        byPeriod[pd].cnt+=w; byPeriod[pd].sg+=sub.sg; byPeriod[pd].sm+=sub.sm;
+        byPeriod[pd].sl+=sub.sl; byPeriod[pd].sc+=sub.sc;
+        byPeriod[pd].ss+=sub.ss; byPeriod[pd].si+=sub.si;
     });
 
     const periods = Object.keys(byPeriod).sort();
