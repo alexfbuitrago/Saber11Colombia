@@ -141,9 +141,11 @@ async function loadData() {
             bar.style.width = `${pct}%`;
         }
 
-        // Consolidar municipios cargados para que el selector municipal funcione.
-        // Antes appData.mcpio_records quedaba vacío, aunque rawMcpioRecords sí tenía datos.
+        // Corrección: updateMcpioDropdown() lee appData.mcpio_records.
+        // En la versión original los municipios quedaban solo en rawMcpioRecords.
         appData.mcpio_records = rawMcpioRecords;
+
+        console.info('[SABER11] app.js corregido v2 cargado: filtros de estudiante y contexto activos');
 
         // 4. Cargar GeoJSON georreferenciado
         bar.style.width = '80%';
@@ -285,7 +287,8 @@ function clearFilters() {
 
 // ─── FILTRAR DATOS ────────────────────────────────────────────────────────────
 
-// Normaliza los valores visibles del HTML a las claves usadas en dept_breakdowns.
+// ─── SOPORTE PARA FILTROS CATEGÓRICOS Y DE CONTEXTO ───────────────────────────
+// Normaliza los valores de los selects del HTML a las claves reales presentes en dept_breakdowns.
 function getBreakdownKey(dim, value) {
     if (!value) return '';
     if (dim === 'gender') return value.toLowerCase().startsWith('f') ? 'F' : 'M';
@@ -293,31 +296,30 @@ function getBreakdownKey(dim, value) {
     if (dim === 'stratum') return String(value);
     if (dim === 'nature') {
         const v = value.toLowerCase().trim();
-        // IMPORTANTE: evaluar primero "No Oficial"; "No Oficial" también contiene la palabra "oficial".
-        if (v.startsWith('no')) return 'P';   // Privado / No oficial
-        return 'O';                           // Oficial
+        if (v.startsWith('no')) return 'P';  // No Oficial / privado, si existe en el JSON
+        return 'O';                          // Oficial, si existe en el JSON
     }
     return value;
 }
 
 function getActiveCategoricalFilters() {
     return [
-        { filterName:'nature',  dim:'nat',  key:getBreakdownKey('nature',  filters.nature)  },
-        { filterName:'area',    dim:'area', key:getBreakdownKey('area',    filters.area)    },
-        { filterName:'gender',  dim:'gen',  key:getBreakdownKey('gender',  filters.gender)  },
-        { filterName:'stratum', dim:'str',  key:getBreakdownKey('stratum', filters.stratum) }
+        { name:'nature',  dim:'nat',  key:getBreakdownKey('nature',  filters.nature)  },
+        { name:'area',    dim:'area', key:getBreakdownKey('area',    filters.area)    },
+        { name:'gender',  dim:'gen',  key:getBreakdownKey('gender',  filters.gender)  },
+        { name:'stratum', dim:'str',  key:getBreakdownKey('stratum', filters.stratum) }
     ].filter(f => !!f.key);
 }
 
 function getPeriodBreakdown(period, deptoName) {
-    const per = distributionsByPeriodAndDim[period] || {};
-    return per[deptoName] || null;
+    return (distributionsByPeriodAndDim[period] || {})[deptoName] || null;
 }
 
-// Calcula el subtotal departamental/periodo que corresponde a los filtros categóricos.
-// Si se activa una sola dimensión usa el subtotal real del JSON. Si se activan varias,
-// como el JSON trae marginales y no cruces (género×estrato×área...), se aplica una
-// estimación ponderada por proporciones marginales. Esto evita dejar los filtros sin efecto.
+function emptyAgg() { return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 }; }
+
+// Aplica filtros de género, estrato, área y naturaleza a una fila departamental.
+// Para una sola dimensión usa el subtotal real de dept_breakdowns.
+// Para varias dimensiones, como el JSON no trae cruces género×estrato×área, estima con proporciones marginales.
 function applyCategoricalFiltersToDeptRow(r) {
     const origCnt = r[DC.count] || 0;
     const base = {
@@ -333,31 +335,37 @@ function applyCategoricalFiltersToDeptRow(r) {
     if (!origCnt || active.length === 0) return base;
 
     const bd = getPeriodBreakdown(r[DC.periodo], r[DC.depto_name]);
-    if (!bd) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+    if (!bd) return emptyAgg();
 
     let ratio = 1;
-    let weightedAvgGlobal = 0;
-    let weightForAvg = 0;
+    let globalNumerator = 0;
+    let globalDenominator = 0;
 
     for (const f of active) {
-        const item = bd[f.dim] && bd[f.dim][f.key];
-        if (!item || !item.cnt) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
-        const p = item.cnt / origCnt;
-        ratio *= p;
+        let item = bd[f.dim] && bd[f.dim][f.key];
+
+        // En el JSON adjunto, naturaleza aparece como NR en todos los departamentos.
+        // Si no existe O/P, no se fuerza a cero; se deja sin efecto para no vaciar el tablero.
+        if (!item && f.name === 'nature' && bd.nat && bd.nat.NR) {
+            item = bd.nat.NR;
+        }
+
+        if (!item || !item.cnt) return emptyAgg();
+        ratio *= (item.cnt / origCnt);
         if (item.sg) {
-            weightedAvgGlobal += (item.sg / item.cnt) * item.cnt;
-            weightForAvg += item.cnt;
+            globalNumerator += item.sg;
+            globalDenominator += item.cnt;
         }
     }
 
     const subCnt = Math.round(origCnt * ratio);
-    if (!subCnt) return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+    if (!subCnt) return emptyAgg();
+    const avgGlobal = globalDenominator ? (globalNumerator / globalDenominator) : (r[DC.avg_global] || 0);
 
-    const avgGlobal = weightForAvg ? (weightedAvgGlobal / weightForAvg) : (r[DC.avg_global] || 0);
     return {
         cnt: subCnt,
         sg: avgGlobal * subCnt,
-        // No hay desagregación por materia en dept_breakdowns; se conservan promedios por materia del universo filtrado.
+        // El JSON no trae puntajes por materia dentro de cada categoría; se mantiene el promedio por materia del registro base.
         sm: (r[DC.avg_mat] || 0) * subCnt,
         sl: (r[DC.avg_lec] || 0) * subCnt,
         sc: (r[DC.avg_cna] || 0) * subCnt,
@@ -366,8 +374,12 @@ function applyCategoricalFiltersToDeptRow(r) {
     };
 }
 
-function hasCategoricalFilters() {
-    return getActiveCategoricalFilters().length > 0;
+function hasCategoricalFilters() { return getActiveCategoricalFilters().length > 0; }
+
+function activeDeptPeriods() {
+    const set = new Set();
+    filterDeptRecords().forEach(r => set.add(`${r[DC.periodo]}|${r[DC.depto_name]}`));
+    return set;
 }
 function filterDeptRecords() {
     return appData.dept_records.filter(r => {
@@ -443,9 +455,6 @@ function filterMcpioRecords() {
         const a = agg[code];
         let count = r[MC.count];
         let avgGlobal = r[MC.avg_global];
-
-        // Aproximación municipal: no existe breakdown municipal en el JSON; se usa la proporción
-        // departamental del mismo periodo para que género/estrato/naturaleza/área afecten el comparador.
         if (hasCategoricalFilters()) {
             const deptLikeRow = [r[MC.periodo], r[MC.depto_code], r[MC.depto_name], r[MC.count], r[MC.avg_global], r[MC.avg_mat], r[MC.avg_lec], r[MC.avg_cna], r[MC.avg_soc], r[MC.avg_ing], r[MC.avg_hh_size], r[MC.avg_father_edu], r[MC.avg_mother_edu]];
             const sub = applyCategoricalFiltersToDeptRow(deptLikeRow);
@@ -484,7 +493,6 @@ function filterMcpioRecords() {
 
 // ─── ACTUALIZAR TODO ──────────────────────────────────────────────────────────
 function updateDashboard() {
-    const dRows = filterDeptRecords();
     updateKPIs();
     if (map) renderGeoLayer();
     renderNatureChart();
@@ -500,9 +508,9 @@ function updateDashboard() {
 
 // ─── KPIs ─────────────────────────────────────────────────────────────────────
 function updateKPIs() {
-    const deptStats = getDeptStats();
+    const stats = getDeptStats();
     let totalCnt=0, sg=0, sm=0, sl=0, sc=0, ss=0, si=0;
-    Object.values(deptStats).forEach(s => {
+    Object.values(stats).forEach(s => {
         const w = s.cnt || 0;
         totalCnt += w;
         sg += (s.global || 0) * w;
@@ -535,7 +543,7 @@ function getDeptStats() {
     const dRows = filterDeptRecords();
     dRows.forEach(r => {
         const dn = r[DC.depto_name];
-        if (!stats[dn]) stats[dn] = { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
+        if (!stats[dn]) stats[dn] = emptyAgg();
         const sub = applyCategoricalFiltersToDeptRow(r);
         stats[dn].cnt += sub.cnt;
         stats[dn].sg  += sub.sg;
@@ -633,33 +641,20 @@ function renderGeoLayer() {
  * puntaje por género y estrato cuando los datos dimensionados están disponibles.
  */
 function getDeptoDistrib() {
-    const target = filters.depto ? [filters.depto] : Object.keys(appData.distributions);
+    const active = activeDeptPeriods();
     const agg = { nat:[0,0], area:[0,0], gen:[0,0], str: Array(6).fill(null).map(()=>[0,0]) };
 
-    // Determinar qué periodos corresponden a los filtros de años y semestres
-    const activePeriods = [];
-    rawPeriodFiles.forEach(entry => {
-        const yr = Math.floor(entry.period / 10);
-        const sm = entry.period % 10;
-        if (filters.year_start && yr < filters.year_start) return;
-        if (filters.year_end   && yr > filters.year_end)   return;
-        if (filters.sem && sm !== +filters.sem) return;
-        activePeriods.push(entry.period);
-    });
-
-    target.forEach(dn => {
-        activePeriods.forEach(p => {
-            const periodDist = distributionsByPeriod[p];
-            if (!periodDist) return;
-            const d = periodDist[dn];
-            if (!d) return;
-            agg.nat[0]  += d.nat[0] || 0;  agg.nat[1]  += d.nat[1] || 0;
-            agg.area[0] += d.area[0] || 0; agg.area[1] += d.area[1] || 0;
-            agg.gen[0]  += d.gen[0] || 0;  agg.gen[1]  += d.gen[1] || 0;
-            d.str.forEach((sv, i) => {
-                agg.str[i][0] += sv[0] || 0;
-                agg.str[i][1] += (sv[1] * sv[0]) || 0;
-            });
+    active.forEach(key => {
+        const [pStr, dn] = key.split('|');
+        const p = +pStr;
+        const d = (distributionsByPeriod[p] || {})[dn];
+        if (!d) return;
+        agg.nat[0]  += d.nat?.[0] || 0;  agg.nat[1]  += d.nat?.[1] || 0;
+        agg.area[0] += d.area?.[0] || 0; agg.area[1] += d.area?.[1] || 0;
+        agg.gen[0]  += d.gen?.[0] || 0;  agg.gen[1]  += d.gen?.[1] || 0;
+        (d.str || []).forEach((sv, i) => {
+            agg.str[i][0] += sv[0] || 0;
+            agg.str[i][1] += ((sv[1] || 0) * (sv[0] || 0));
         });
     });
     return agg;
