@@ -127,10 +127,11 @@
                     <div class="filter-group">
                         <label class="filter-label"><i class="fa-solid fa-user"></i> Datos del Estudiante</label>
                         <div class="select-wrapper">
-                            <select id="select-gender" class="filter-select">
-                                <option value="">Todos los Géneros</option>
-                                <option value="Femenino">Femenino</option>
-                                <option value="Masculino">Masculino</option>
+                            <select id="select-gender" class="filter-select" title="Filtra por género individual del estudiante. No usa cole_genero, porque ese campo describe la composición del colegio.">
+                                <option value="">Todos los géneros de estudiante</option>
+                                <option value="Femenino">Femenino / Mujer</option>
+                                <option value="Masculino">Masculino / Hombre</option>
+                                <option value="ND">No definido / No registra</option>
                             </select>
                         </div>
                         <div class="select-wrapper mt-2">
@@ -585,6 +586,6 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     
     <!-- Application Logic Script -->
-    <script src="app.js"></script>
+    <script src="app_v5_genero_estudiante_no_definido.js"></script>
 </body>
 </html>
