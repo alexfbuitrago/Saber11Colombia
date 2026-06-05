@@ -15,12 +15,12 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
           
     <!-- Custom Style Sheet (Vanilla CSS) -->
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style_actualizado_claro_oscuro.css">
     
     <!-- FontAwesome for Premium Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body>
+<body data-theme="dark">
     <!-- App Container -->
     <div id="app-container">
         <!-- Header -->
@@ -38,6 +38,12 @@
             </div>
             <div class="header-badge">
                 <span class="badge-text"><i class="fa-solid fa-database"></i> 9.1 GB de Datos ICFES</span>
+            </div>
+            <div class="theme-toggle-wrapper" title="Cambiar entre tema oscuro y tema claro">
+                <button id="btn-theme-toggle" class="btn-secondary theme-toggle-btn" type="button" aria-label="Cambiar a tema claro" aria-pressed="false">
+                    <i class="fa-solid fa-moon theme-icon" aria-hidden="true"></i>
+                    <span class="theme-label">Tema oscuro</span>
+                </button>
             </div>
         </header>
 
@@ -584,8 +590,44 @@
             
     <!-- Chart.js for gorgeous interactive charts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- Theme Switcher: claro / oscuro -->
+    <script>
+        (function () {
+            const STORAGE_KEY = 'saber11-theme';
+            const body = document.body;
+            const btn = document.getElementById('btn-theme-toggle');
+            const icon = btn ? btn.querySelector('.theme-icon') : null;
+            const label = btn ? btn.querySelector('.theme-label') : null;
+
+            function applyTheme(theme) {
+                const safeTheme = theme === 'light' ? 'light' : 'dark';
+                body.setAttribute('data-theme', safeTheme);
+                try { localStorage.setItem(STORAGE_KEY, safeTheme); } catch (_) {}
+                if (!btn) return;
+                const isLight = safeTheme === 'light';
+                btn.setAttribute('aria-pressed', String(isLight));
+                btn.setAttribute('aria-label', isLight ? 'Cambiar a tema oscuro' : 'Cambiar a tema claro');
+                if (label) label.textContent = isLight ? 'Tema claro' : 'Tema oscuro';
+                if (icon) {
+                    icon.classList.toggle('fa-sun', isLight);
+                    icon.classList.toggle('fa-moon', !isLight);
+                }
+            }
+
+            let savedTheme = 'dark';
+            try { savedTheme = localStorage.getItem(STORAGE_KEY) || 'dark'; } catch (_) {}
+            applyTheme(savedTheme);
+            if (btn) {
+                btn.addEventListener('click', function () {
+                    const current = body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+                    applyTheme(current === 'light' ? 'dark' : 'light');
+                });
+            }
+        })();
+    </script>
+
     
     <!-- Application Logic Script -->
-    <script src="app_v5_genero_estudiante_no_definido.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>
