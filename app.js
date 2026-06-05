@@ -141,11 +141,11 @@ async function loadData() {
             bar.style.width = `${pct}%`;
         }
 
-        // Corrección: updateMcpioDropdown() lee appData.mcpio_records.
-        // En la versión original los municipios quedaban solo en rawMcpioRecords.
+        // Corrección v3: updateMcpioDropdown() consulta appData.mcpio_records.
+        // Los archivos por periodo cargan municipios en rawMcpioRecords; aquí se consolida la caché pública.
         appData.mcpio_records = rawMcpioRecords;
 
-        console.info('[SABER11] app.js corregido v2 cargado: filtros de estudiante y contexto activos');
+        console.info('[SABER11] app.js corregido v3 cargado: filtros normalizados por alias de género, carácter/naturaleza, área y estrato');
 
         // 4. Cargar GeoJSON georreferenciado
         bar.style.width = '80%';
@@ -287,28 +287,141 @@ function clearFilters() {
 
 // ─── FILTRAR DATOS ────────────────────────────────────────────────────────────
 
-// ─── SOPORTE PARA FILTROS CATEGÓRICOS Y DE CONTEXTO ───────────────────────────
-// Normaliza los valores de los selects del HTML a las claves reales presentes en dept_breakdowns.
-function getBreakdownKey(dim, value) {
-    if (!value) return '';
-    if (dim === 'gender') return value.toLowerCase().startsWith('f') ? 'F' : 'M';
-    if (dim === 'area') return value.toLowerCase().startsWith('u') ? 'U' : 'R';
-    if (dim === 'stratum') return String(value);
-    if (dim === 'nature') {
-        const v = value.toLowerCase().trim();
-        if (v.startsWith('no')) return 'P';  // No Oficial / privado, si existe en el JSON
-        return 'O';                          // Oficial, si existe en el JSON
+// ─── NORMALIZACIÓN ROBUSTA DE FILTROS ─────────────────────────────────────────
+// Los JSON históricos pueden codificar las mismas categorías con variantes como:
+// género: F/M, Mujer/Hombre, Femenino/Masculino; carácter: O/P, Oficial/No Oficial,
+// Público/Privado; área: U/R, Urbano/Rural. Estas funciones unifican esas variantes.
+const FILTER_ALIAS = {
+    gender: {
+        F: ['F','FEMENINO','FEMENINA','MUJER','MUJERES','FEMALE','NIÑA','NIÑAS'],
+        M: ['M','MASCULINO','MASCULINA','HOMBRE','HOMBRES','MALE','NIÑO','NIÑOS']
+    },
+    nature: {
+        O: ['O','OFICIAL','PUBLICO','PUBLICA','PÚBLICO','PÚBLICA','ESTATAL','OFICIAL NACIONAL','OFICIAL DEPARTAMENTAL','OFICIAL MUNICIPAL'],
+        P: ['P','NO OFICIAL','NOOFICIAL','NO-OFICIAL','PRIVADO','PRIVADA','PARTICULAR','NO OFICIAL PRIVADO','NO OFICIAL/PRIVADO']
+    },
+    area: {
+        U: ['U','URBANO','URBANA','CABECERA','CABECERA MUNICIPAL','ZONA URBANA','URBAN'],
+        R: ['R','RURAL','RURAL DISPERSO','CENTRO POBLADO','ZONA RURAL']
+    },
+    stratum: {
+        '1': ['1','E1','ESTRATO 1','ESTRATO1','UNO','BAJO BAJO','BAJO-BAJO'],
+        '2': ['2','E2','ESTRATO 2','ESTRATO2','DOS','BAJO'],
+        '3': ['3','E3','ESTRATO 3','ESTRATO3','TRES','MEDIO BAJO','MEDIO-BAJO'],
+        '4': ['4','E4','ESTRATO 4','ESTRATO4','CUATRO','MEDIO'],
+        '5': ['5','E5','ESTRATO 5','ESTRATO5','CINCO','MEDIO ALTO','MEDIO-ALTO'],
+        '6': ['6','E6','ESTRATO 6','ESTRATO6','SEIS','ALTO']
     }
-    return value;
+};
+
+const BREAKDOWN_DIM_ALIASES = {
+    nat:  ['nat','nature','naturaleza','caracter','carácter','cole_naturaleza','cole_caracter','cole_carácter'],
+    area: ['area','zona','sector','ubicacion','ubicación','cole_area_ubicacion','cole_area_ubicación'],
+    gen:  ['gen','gender','genero','género','sexo','estu_genero','estu_género'],
+    str:  ['str','estrato','stratum','estu_estrato','fami_estratovivienda']
+};
+
+const WARNED_UNAVAILABLE_FILTERS = new Set();
+
+function normalizeText(value) {
+    return String(value ?? '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase()
+        .replace(/[\._/\\|]+/g, ' ')
+        .replace(/[\-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function aliasesFor(filterName, canonicalKey) {
+    return (FILTER_ALIAS[filterName] && FILTER_ALIAS[filterName][canonicalKey] || [])
+        .map(normalizeText);
+}
+
+function canonicalFilterKey(filterName, rawValue) {
+    if (!rawValue) return '';
+    const n = normalizeText(rawValue);
+    if (filterName === 'gender') {
+        if (aliasesFor('gender','F').includes(n)) return 'F';
+        if (aliasesFor('gender','M').includes(n)) return 'M';
+    }
+    if (filterName === 'nature') {
+        // Orden importante: No Oficial debe evaluarse antes de Oficial.
+        if (aliasesFor('nature','P').includes(n)) return 'P';
+        if (aliasesFor('nature','O').includes(n)) return 'O';
+    }
+    if (filterName === 'area') {
+        if (aliasesFor('area','U').includes(n)) return 'U';
+        if (aliasesFor('area','R').includes(n)) return 'R';
+    }
+    if (filterName === 'stratum') {
+        const digit = n.match(/[1-6]/)?.[0];
+        if (digit) return digit;
+        for (const k of ['1','2','3','4','5','6']) if (aliasesFor('stratum', k).includes(n)) return k;
+    }
+    return n;
 }
 
 function getActiveCategoricalFilters() {
     return [
-        { name:'nature',  dim:'nat',  key:getBreakdownKey('nature',  filters.nature)  },
-        { name:'area',    dim:'area', key:getBreakdownKey('area',    filters.area)    },
-        { name:'gender',  dim:'gen',  key:getBreakdownKey('gender',  filters.gender)  },
-        { name:'stratum', dim:'str',  key:getBreakdownKey('stratum', filters.stratum) }
+        { name:'nature',  dim:'nat',  key:canonicalFilterKey('nature',  filters.nature),  label:filters.nature  },
+        { name:'area',    dim:'area', key:canonicalFilterKey('area',    filters.area),    label:filters.area    },
+        { name:'gender',  dim:'gen',  key:canonicalFilterKey('gender',  filters.gender),  label:filters.gender  },
+        { name:'stratum', dim:'str',  key:canonicalFilterKey('stratum', filters.stratum), label:filters.stratum }
     ].filter(f => !!f.key);
+}
+
+function getBreakdownDimension(bd, canonicalDim) {
+    if (!bd) return null;
+    const aliases = BREAKDOWN_DIM_ALIASES[canonicalDim] || [canonicalDim];
+    const direct = aliases.find(a => bd[a]);
+    if (direct) return bd[direct];
+    const byNormalized = Object.keys(bd).find(k => aliases.map(normalizeText).includes(normalizeText(k)));
+    return byNormalized ? bd[byNormalized] : null;
+}
+
+function categoryMatches(filterName, canonicalKey, categoryKey) {
+    const n = normalizeText(categoryKey);
+    if (!n) return false;
+    if (filterName === 'stratum') {
+        return n === canonicalKey || aliasesFor('stratum', canonicalKey).includes(n) || normalizeText(`ESTRATO ${canonicalKey}`) === n;
+    }
+    const ali = aliasesFor(filterName, canonicalKey);
+    if (ali.includes(n)) return true;
+
+    // Reglas controladas para variantes largas, evitando que "NO OFICIAL" coincida con "OFICIAL".
+    if (filterName === 'nature') {
+        if (canonicalKey === 'P') return n.includes('NO OFICIAL') || n.includes('PRIVAD') || n.includes('PARTICULAR');
+        if (canonicalKey === 'O') return !n.includes('NO OFICIAL') && (n === 'OFICIAL' || n.includes('PUBLIC') || n.includes('ESTATAL'));
+    }
+    if (filterName === 'gender') {
+        if (canonicalKey === 'F') return n.includes('FEMEN') || n.includes('MUJER') || n === 'F';
+        if (canonicalKey === 'M') return n.includes('MASCUL') || n.includes('HOMBRE') || n === 'M';
+    }
+    if (filterName === 'area') {
+        if (canonicalKey === 'U') return n.includes('URBAN') || n.includes('CABECERA') || n === 'U';
+        if (canonicalKey === 'R') return n.includes('RURAL') || n === 'R';
+    }
+    return false;
+}
+
+function findBreakdownItem(bd, filter) {
+    const dimObj = getBreakdownDimension(bd, filter.dim);
+    if (!dimObj) return { unavailable:true, item:null };
+
+    // Si la dimensión existe pero solo está codificada como NR/SIN INFO, el filtro no puede aplicarse.
+    const keys = Object.keys(dimObj);
+    const informativeKeys = keys.filter(k => !['NR','N R','NO REGISTRA','SIN INFORMACION','SIN INFORMACIÓN',''].includes(normalizeText(k)));
+    if (informativeKeys.length === 0) return { unavailable:true, item:null };
+
+    // 1. Búsqueda directa por clave canónica.
+    if (dimObj[filter.key]) return { unavailable:false, item:dimObj[filter.key] };
+
+    // 2. Búsqueda por alias y variantes textuales.
+    const matchedKey = keys.find(k => categoryMatches(filter.name, filter.key, k));
+    if (matchedKey) return { unavailable:false, item:dimObj[matchedKey] };
+
+    return { unavailable:false, item:null };
 }
 
 function getPeriodBreakdown(period, deptoName) {
@@ -317,9 +430,16 @@ function getPeriodBreakdown(period, deptoName) {
 
 function emptyAgg() { return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 }; }
 
-// Aplica filtros de género, estrato, área y naturaleza a una fila departamental.
-// Para una sola dimensión usa el subtotal real de dept_breakdowns.
-// Para varias dimensiones, como el JSON no trae cruces género×estrato×área, estima con proporciones marginales.
+function warnUnavailableFilter(filter) {
+    const id = `${filter.name}:${filter.key}`;
+    if (WARNED_UNAVAILABLE_FILTERS.has(id)) return;
+    WARNED_UNAVAILABLE_FILTERS.add(id);
+    console.warn(`[SABER11] El filtro ${filter.name}=${filter.label || filter.key} no se aplica en algunos periodos/departamentos porque el JSON no trae esa dimensión o viene como NR.`);
+}
+
+// Aplica género, estrato, área y carácter/naturaleza sobre dept_breakdowns.
+// Una sola dimensión usa subtotal real; múltiples dimensiones se estiman con proporciones marginales
+// porque los JSON agregados no traen cruces completos género×estrato×área×naturaleza.
 function applyCategoricalFiltersToDeptRow(r) {
     const origCnt = r[DC.count] || 0;
     const base = {
@@ -340,32 +460,32 @@ function applyCategoricalFiltersToDeptRow(r) {
     let ratio = 1;
     let globalNumerator = 0;
     let globalDenominator = 0;
+    let applied = 0;
 
     for (const f of active) {
-        let item = bd[f.dim] && bd[f.dim][f.key];
-
-        // En el JSON adjunto, naturaleza aparece como NR en todos los departamentos.
-        // Si no existe O/P, no se fuerza a cero; se deja sin efecto para no vaciar el tablero.
-        if (!item && f.name === 'nature' && bd.nat && bd.nat.NR) {
-            item = bd.nat.NR;
+        const found = findBreakdownItem(bd, f);
+        if (found.unavailable) {
+            warnUnavailableFilter(f);
+            continue; // no vacía el tablero si el JSON no tiene esa dimensión codificada.
         }
-
+        const item = found.item;
         if (!item || !item.cnt) return emptyAgg();
         ratio *= (item.cnt / origCnt);
+        applied += 1;
         if (item.sg) {
             globalNumerator += item.sg;
             globalDenominator += item.cnt;
         }
     }
 
+    if (applied === 0) return base;
     const subCnt = Math.round(origCnt * ratio);
     if (!subCnt) return emptyAgg();
     const avgGlobal = globalDenominator ? (globalNumerator / globalDenominator) : (r[DC.avg_global] || 0);
-
     return {
         cnt: subCnt,
         sg: avgGlobal * subCnt,
-        // El JSON no trae puntajes por materia dentro de cada categoría; se mantiene el promedio por materia del registro base.
+        // dept_breakdowns solo trae sg en los JSON revisados; por materia se mantiene el promedio del agregado base.
         sm: (r[DC.avg_mat] || 0) * subCnt,
         sl: (r[DC.avg_lec] || 0) * subCnt,
         sc: (r[DC.avg_cna] || 0) * subCnt,
