@@ -3,7 +3,7 @@
    Estructura de datos compacta multitabla:
      data.dept_records  → [periodo, depto_code, depto_name, count, avg_global, avg_mat, avg_lec, avg_cna, avg_soc, avg_ing]
      data.mcpio_records → [mcpio_code, mcpio_name, depto_code, depto_name, count, avg_global, avg_mat, avg_lec, avg_cna, avg_soc, avg_ing]
-     data.distributions → deptoName: {nat:[O,P], area:[U,R], gen:  ['gen','gender','genero','género','sexo','estu_genero','estu_género','estu_sexo'], str:[[cnt,avg]×6]}
+     data.distributions → deptoName: {nat:[O,P], area:[U,R], gen:[F,M], str:[[cnt,avg]×6]}
      data.clusters      → deptoName: {cl,lv,lb,sc,po,pr,ps,hh_avg,father_edu_avg,mother_edu_avg}
 
    FILTROS ACTIVOS:
@@ -141,6 +141,10 @@ async function loadData() {
             bar.style.width = `${pct}%`;
         }
 
+        // FIX filtros v6: consolidar municipios cargados para selector municipal y comparador.
+        appData.mcpio_records = rawMcpioRecords;
+        console.info('[SABER11] app.js v6 cargado: filtros de estudiante/contexto activos');
+
         // 4. Cargar GeoJSON georreferenciado
         bar.style.width = '80%';
         const rGeo = await fetch('colombia.geojson');
@@ -203,20 +207,24 @@ function populateFilters() {
     // ── Event listeners de filtros de características del colegio ──
     document.getElementById('select-nature').addEventListener('change', e => {
         filters.nature = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-area').addEventListener('change', e => {
         filters.area = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 
     // ── Event listeners de filtros de datos del estudiante ──
     document.getElementById('select-gender').addEventListener('change', e => {
         filters.gender = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-stratum').addEventListener('change', e => {
         filters.stratum = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 
@@ -224,14 +232,17 @@ function populateFilters() {
     // por su avg_hh_size, avg_father_edu o avg_mother_edu (rangos numéricos)
     document.getElementById('select-hh-size').addEventListener('change', e => {
         filters.hh_size = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-father-edu').addEventListener('change', e => {
         filters.father_edu = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
     document.getElementById('select-mother-edu').addEventListener('change', e => {
         filters.mother_edu = e.target.value;
+        renderGeoLayer();
         updateDashboard();
     });
 }
@@ -273,6 +284,220 @@ function clearFilters() {
 }
 
 // ─── FILTRAR DATOS ────────────────────────────────────────────────────────────
+
+// ─── NORMALIZACIÓN Y APLICACIÓN DE FILTROS CATEGÓRICOS ───────────────────────
+// Importante: género se refiere al estudiante; NO se usa cole_genero porque ese campo
+// describe la composición del colegio (femenino/masculino/mixto).
+const FILTER_ALIAS = {
+    gender: {
+        F:  ['F','FEMENINO','FEMENINA','MUJER','MUJERES','FEMALE','NIÑA','NIÑAS'],
+        M:  ['M','MASCULINO','MASCULINA','HOMBRE','HOMBRES','MALE','NIÑO','NIÑOS'],
+        ND: ['ND','N/D','NO DEFINIDO','NO DEFINIDA','NO REGISTRA','SIN INFORMACION','SIN INFORMACIÓN','NR','N R','NA','N/A','X','OTRO','OTRA','NO BINARIO','NO BINARIA']
+    },
+    nature: {
+        O: ['O','OFICIAL','PUBLICO','PUBLICA','PÚBLICO','PÚBLICA','ESTATAL'],
+        P: ['P','NO OFICIAL','NOOFICIAL','NO-OFICIAL','PRIVADO','PRIVADA','PARTICULAR']
+    },
+    area: {
+        // En algunos archivos antiguos el área puede venir como 1=urbano y 2=rural.
+        U: ['U','1','URBANO','URBANA','CABECERA','CABECERA MUNICIPAL','ZONA URBANA','URBAN'],
+        R: ['R','2','RURAL','RURAL DISPERSO','CENTRO POBLADO','ZONA RURAL']
+    },
+    stratum: {
+        '1': ['1','E1','ESTRATO 1','ESTRATO1','UNO','BAJO BAJO','BAJO-BAJO'],
+        '2': ['2','E2','ESTRATO 2','ESTRATO2','DOS','BAJO'],
+        '3': ['3','E3','ESTRATO 3','ESTRATO3','TRES','MEDIO BAJO','MEDIO-BAJO'],
+        '4': ['4','E4','ESTRATO 4','ESTRATO4','CUATRO','MEDIO'],
+        '5': ['5','E5','ESTRATO 5','ESTRATO5','CINCO','MEDIO ALTO','MEDIO-ALTO'],
+        '6': ['6','E6','ESTRATO 6','ESTRATO6','SEIS','ALTO']
+    }
+};
+
+const BREAKDOWN_DIM_ALIASES = {
+    nat:  ['nat','nature','naturaleza','caracter','carácter','cole_naturaleza','cole_caracter','cole_carácter'],
+    area: ['area','zona','sector','ubicacion','ubicación','cole_area_ubicacion','cole_area_ubicación','estu_area_reside','estu_zona_reside'],
+    gen:  ['gen','gender','genero','género','sexo','estu_genero','estu_género','estu_sexo'],
+    str:  ['str','estrato','stratum','estu_estrato','fami_estratovivienda']
+};
+
+const WARNED_UNAVAILABLE_FILTERS = new Set();
+
+function normalizeText(value) {
+    return String(value ?? '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase()
+        .replace(/[\._/\\|]+/g, ' ')
+        .replace(/[-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function aliasesFor(filterName, canonicalKey) {
+    return (FILTER_ALIAS[filterName]?.[canonicalKey] || []).map(normalizeText);
+}
+
+function canonicalFilterKey(filterName, rawValue) {
+    if (!rawValue) return '';
+    const n = normalizeText(rawValue);
+    if (filterName === 'gender') {
+        if (aliasesFor('gender','F').includes(n)) return 'F';
+        if (aliasesFor('gender','M').includes(n)) return 'M';
+        if (aliasesFor('gender','ND').includes(n)) return 'ND';
+    }
+    if (filterName === 'nature') {
+        // Primero No Oficial/Privado para evitar que "No Oficial" coincida con Oficial.
+        if (aliasesFor('nature','P').includes(n) || n.includes('NO OFICIAL') || n.includes('PRIVAD')) return 'P';
+        if (aliasesFor('nature','O').includes(n) || n === 'OFICIAL' || n.includes('PUBLIC') || n.includes('ESTATAL')) return 'O';
+    }
+    if (filterName === 'area') {
+        if (aliasesFor('area','U').includes(n)) return 'U';
+        if (aliasesFor('area','R').includes(n)) return 'R';
+    }
+    if (filterName === 'stratum') {
+        const digit = n.match(/[1-6]/)?.[0];
+        if (digit) return digit;
+    }
+    return n;
+}
+
+function getActiveCategoricalFilters() {
+    return [
+        { name:'nature',  dim:'nat',  key:canonicalFilterKey('nature',  filters.nature),  label:filters.nature  },
+        { name:'area',    dim:'area', key:canonicalFilterKey('area',    filters.area),    label:filters.area    },
+        { name:'gender',  dim:'gen',  key:canonicalFilterKey('gender',  filters.gender),  label:filters.gender  },
+        { name:'stratum', dim:'str',  key:canonicalFilterKey('stratum', filters.stratum), label:filters.stratum }
+    ].filter(f => !!f.key);
+}
+
+function getBreakdownDimension(bd, canonicalDim) {
+    if (!bd) return null;
+    const aliases = BREAKDOWN_DIM_ALIASES[canonicalDim] || [canonicalDim];
+    const direct = aliases.find(a => bd[a]);
+    if (direct) return bd[direct];
+    const normAliases = aliases.map(normalizeText);
+    const byNormalized = Object.keys(bd).find(k => normAliases.includes(normalizeText(k)));
+    return byNormalized ? bd[byNormalized] : null;
+}
+
+function categoryMatches(filterName, canonicalKey, categoryKey) {
+    const n = normalizeText(categoryKey);
+    if (!n) return false;
+
+    if (filterName === 'stratum') {
+        return n === canonicalKey || normalizeText(`ESTRATO ${canonicalKey}`) === n || aliasesFor('stratum', canonicalKey).includes(n);
+    }
+
+    if (aliasesFor(filterName, canonicalKey).includes(n)) return true;
+
+    if (filterName === 'gender') {
+        if (canonicalKey === 'F') return n === 'F' || n.includes('FEMEN') || n.includes('MUJER');
+        if (canonicalKey === 'M') return n === 'M' || n.includes('MASCUL') || n.includes('HOMBRE');
+        if (canonicalKey === 'ND') return ['ND','N D','NR','N R','NA','N A','N/A','X','NO DEFINIDO','NO DEFINIDA','NO REGISTRA','SIN INFORMACION','SIN INFORMACIÓN','OTRO','OTRA'].includes(n) || n.includes('NO BINARI');
+    }
+    if (filterName === 'area') {
+        if (canonicalKey === 'U') return n === 'U' || n === '1' || n.includes('URBAN') || n.includes('CABECERA');
+        if (canonicalKey === 'R') return n === 'R' || n === '2' || n.includes('RURAL') || n.includes('CENTRO POBLADO');
+    }
+    if (filterName === 'nature') {
+        if (canonicalKey === 'P') return n.includes('NO OFICIAL') || n.includes('PRIVAD') || n.includes('PARTICULAR');
+        if (canonicalKey === 'O') return !n.includes('NO OFICIAL') && (n === 'OFICIAL' || n.includes('PUBLIC') || n.includes('ESTATAL'));
+    }
+    return false;
+}
+
+function findBreakdownItem(bd, filter) {
+    const dimObj = getBreakdownDimension(bd, filter.dim);
+    if (!dimObj) return { unavailable:true, item:null };
+
+    const keys = Object.keys(dimObj);
+    const nonInformative = ['NR','N R','NO REGISTRA','SIN INFORMACION','SIN INFORMACIÓN',''];
+    const informativeKeys = keys.filter(k => !nonInformative.includes(normalizeText(k)));
+    // Si el usuario pide explícitamente No definido, NR/X sí son categorías válidas.
+    if (informativeKeys.length === 0 && !(filter.name === 'gender' && filter.key === 'ND')) {
+        return { unavailable:true, item:null };
+    }
+
+    if (dimObj[filter.key]) return { unavailable:false, item:dimObj[filter.key] };
+    const matchedKey = keys.find(k => categoryMatches(filter.name, filter.key, k));
+    if (matchedKey) return { unavailable:false, item:dimObj[matchedKey] };
+    return { unavailable:false, item:null };
+}
+
+function getPeriodBreakdown(period, deptoName) {
+    return (distributionsByPeriodAndDim[period] || {})[deptoName] || null;
+}
+
+function emptyAgg() { return { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 }; }
+
+function warnUnavailableFilter(filter) {
+    const id = `${filter.name}:${filter.key}`;
+    if (WARNED_UNAVAILABLE_FILTERS.has(id)) return;
+    WARNED_UNAVAILABLE_FILTERS.add(id);
+    console.warn(`[SABER11] Filtro ${filter.name}=${filter.label || filter.key} no aplicable en algunos periodos/departamentos: dimensión ausente o NR.`);
+}
+
+function applyCategoricalFiltersToDeptRow(r) {
+    const origCnt = r[DC.count] || 0;
+    const base = {
+        cnt: origCnt,
+        sg: (r[DC.avg_global] || 0) * origCnt,
+        sm: (r[DC.avg_mat] || 0) * origCnt,
+        sl: (r[DC.avg_lec] || 0) * origCnt,
+        sc: (r[DC.avg_cna] || 0) * origCnt,
+        ss: (r[DC.avg_soc] || 0) * origCnt,
+        si: (r[DC.avg_ing] || 0) * origCnt
+    };
+
+    const active = getActiveCategoricalFilters();
+    if (!origCnt || active.length === 0) return base;
+
+    const bd = getPeriodBreakdown(r[DC.periodo], r[DC.depto_name]);
+    if (!bd) return emptyAgg();
+
+    let ratio = 1;
+    let globalNumerator = 0;
+    let globalDenominator = 0;
+    let applied = 0;
+
+    for (const f of active) {
+        const found = findBreakdownItem(bd, f);
+        if (found.unavailable) {
+            warnUnavailableFilter(f);
+            continue; // no vacía todo el tablero cuando el JSON no trae esa dimensión.
+        }
+        const item = found.item;
+        if (!item || !item.cnt) return emptyAgg();
+        ratio *= (item.cnt / origCnt);
+        applied += 1;
+        if (item.sg) {
+            globalNumerator += item.sg;
+            globalDenominator += item.cnt;
+        }
+    }
+
+    if (applied === 0) return base;
+    const subCnt = Math.round(origCnt * ratio);
+    if (!subCnt) return emptyAgg();
+    const avgGlobal = globalDenominator ? globalNumerator / globalDenominator : (r[DC.avg_global] || 0);
+
+    return {
+        cnt: subCnt,
+        sg: avgGlobal * subCnt,
+        sm: (r[DC.avg_mat] || 0) * subCnt,
+        sl: (r[DC.avg_lec] || 0) * subCnt,
+        sc: (r[DC.avg_cna] || 0) * subCnt,
+        ss: (r[DC.avg_soc] || 0) * subCnt,
+        si: (r[DC.avg_ing] || 0) * subCnt
+    };
+}
+
+function hasCategoricalFilters() { return getActiveCategoricalFilters().length > 0; }
+
+function activeDeptPeriods() {
+    const set = new Set();
+    filterDeptRecords().forEach(r => set.add(`${r[DC.periodo]}|${r[DC.depto_name]}`));
+    return set;
+}
 function filterDeptRecords() {
     return appData.dept_records.filter(r => {
         const yr = Math.floor(r[DC.periodo]/10);
@@ -345,9 +570,18 @@ function filterMcpioRecords() {
             };
         }
         const a = agg[code];
-        const count = r[MC.count];
+        let count = r[MC.count];
+        let avgGlobal = r[MC.avg_global];
+        if (hasCategoricalFilters()) {
+            const deptLikeRow = [r[MC.periodo], r[MC.depto_code], r[MC.depto_name], r[MC.count], r[MC.avg_global], r[MC.avg_mat], r[MC.avg_lec], r[MC.avg_cna], r[MC.avg_soc], r[MC.avg_ing], r[MC.avg_hh_size], r[MC.avg_father_edu], r[MC.avg_mother_edu]];
+            const sub = applyCategoricalFiltersToDeptRow(deptLikeRow);
+            const ratio = (r[MC.count] || 0) ? (sub.cnt / r[MC.count]) : 0;
+            count = Math.round(r[MC.count] * ratio);
+            avgGlobal = sub.cnt ? (sub.sg / sub.cnt) : 0;
+        }
+        if (!count) return;
         a.count += count;
-        a.sg += r[MC.avg_global] * count;
+        a.sg += avgGlobal * count;
         a.sm += r[MC.avg_mat] * count;
         a.sl += r[MC.avg_lec] * count;
         a.sc += r[MC.avg_cna] * count;
@@ -376,8 +610,8 @@ function filterMcpioRecords() {
 
 // ─── ACTUALIZAR TODO ──────────────────────────────────────────────────────────
 function updateDashboard() {
-    const dRows = filterDeptRecords();
-    updateKPIs(dRows);
+    updateKPIs();
+    if (map) renderGeoLayer();
     renderNatureChart();
     renderAreaChart();
     renderStratumChart();
@@ -390,26 +624,27 @@ function updateDashboard() {
 }
 
 // ─── KPIs ─────────────────────────────────────────────────────────────────────
-function updateKPIs(rows) {
+function updateKPIs() {
+    const stats = getDeptStats();
     let totalCnt=0, sg=0, sm=0, sl=0, sc=0, ss=0, si=0;
-    rows.forEach(r => {
-        const w = r[DC.count];
+    Object.values(stats).forEach(s => {
+        const w = s.cnt || 0;
         totalCnt += w;
-        sg += r[DC.avg_global] * w;
-        sm += r[DC.avg_mat]    * w;
-        sl += r[DC.avg_lec]    * w;
-        sc += r[DC.avg_cna]    * w;
-        ss += r[DC.avg_soc]    * w;
-        si += r[DC.avg_ing]    * w;
+        sg += (s.global || 0) * w;
+        sm += (s.mat || 0) * w;
+        sl += (s.lec || 0) * w;
+        sc += (s.cna || 0) * w;
+        ss += (s.soc || 0) * w;
+        si += (s.ing || 0) * w;
     });
     const n = totalCnt || 1;
-    document.getElementById('val-kpi-evaluados').textContent = totalCnt.toLocaleString('es-CO');
-    document.getElementById('val-kpi-global').textContent    = Math.round(sg/n);
-    document.getElementById('val-kpi-mat').textContent       = (sm/n).toFixed(1);
-    document.getElementById('val-kpi-lec').textContent       = (sl/n).toFixed(1);
-    document.getElementById('val-kpi-cna').textContent       = (sc/n).toFixed(1);
-    document.getElementById('val-kpi-soc').textContent       = (ss/n).toFixed(1);
-    document.getElementById('val-kpi-ing').textContent       = (si/n).toFixed(1);
+    document.getElementById('val-kpi-evaluados').textContent = Math.round(totalCnt).toLocaleString('es-CO');
+    document.getElementById('val-kpi-global').textContent    = totalCnt ? Math.round(sg/n) : '0';
+    document.getElementById('val-kpi-mat').textContent       = totalCnt ? (sm/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-lec').textContent       = totalCnt ? (sl/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-cna').textContent       = totalCnt ? (sc/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-soc').textContent       = totalCnt ? (ss/n).toFixed(1) : '0.0';
+    document.getElementById('val-kpi-ing').textContent       = totalCnt ? (si/n).toFixed(1) : '0.0';
 }
 
 // ─── MAPA ─────────────────────────────────────────────────────────────────────
@@ -423,68 +658,17 @@ function initMap() {
 function getDeptStats() {
     const stats = {};
     const dRows = filterDeptRecords();
-    const useBreakdowns = (filters.nature || filters.area || filters.gender || filters.stratum) && Object.keys(distributionsByPeriodAndDim).length > 0;
     dRows.forEach(r => {
         const dn = r[DC.depto_name];
-        if (!stats[dn]) stats[dn] = { cnt:0, sg:0, sm:0, sl:0, sc:0, ss:0, si:0 };
-
-        // Default totals from aggregated dept_records row
-        let orig_count = r[DC.count] || 0;
-        let sub_count = orig_count;
-        let sub_sg = r[DC.avg_global] * orig_count;
-        // Per-subject sums approximated by scaling by subgroup proportion when needed
-        let sub_sm = r[DC.avg_mat] * orig_count;
-        let sub_sl = r[DC.avg_lec] * orig_count;
-        let sub_sc = r[DC.avg_cna] * orig_count;
-        let sub_ss = r[DC.avg_soc] * orig_count;
-        let sub_si = r[DC.avg_ing] * orig_count;
-
-        if (useBreakdowns) {
-            // Only support a single categorical filter precisely (no cross-tab)
-            const dims = ['nature','area','gender','stratum'].filter(k => filters[k]);
-            if (dims.length === 1) {
-                const dim = dims[0];
-                const period = r[DC.periodo];
-                const perPeriod = distributionsByPeriodAndDim[period] || {};
-                const bd = perPeriod[dn];
-                if (bd) {
-                    if (dim === 'gender') {
-                        const gk = (filters.gender && filters.gender.toLowerCase().startsWith('f')) ? 'F' : 'M';
-                        const item = bd.gen && bd.gen[gk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'nature') {
-                        const nk = (filters.nature && filters.nature.toLowerCase().includes('oficial')) ? 'O' : 'P';
-                        const item = bd.nat && bd.nat[nk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'area') {
-                        const ak = (filters.area && filters.area.toLowerCase().startsWith('u')) ? 'U' : 'R';
-                        const item = bd.area && bd.area[ak];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    } else if (dim === 'stratum') {
-                        const sk = filters.stratum;
-                        const item = bd.str && bd.str[sk];
-                        if (item) { sub_count = item.cnt; sub_sg = item.sg; }
-                    }
-                    // Scale subject sums proportionally to subgroup when original count > 0
-                    if (orig_count > 0) {
-                        const ratio = sub_count / orig_count;
-                        sub_sm = r[DC.avg_mat] * sub_count;
-                        sub_sl = r[DC.avg_lec] * sub_count;
-                        sub_sc = r[DC.avg_cna] * sub_count;
-                        sub_ss = r[DC.avg_soc] * sub_count;
-                        sub_si = r[DC.avg_ing] * sub_count;
-                    }
-                }
-            }
-        }
-
-        stats[dn].cnt += sub_count;
-        stats[dn].sg  += sub_sg;
-        stats[dn].sm  += sub_sm;
-        stats[dn].sl  += sub_sl;
-        stats[dn].sc  += sub_sc;
-        stats[dn].ss  += sub_ss;
-        stats[dn].si  += sub_si;
+        if (!stats[dn]) stats[dn] = emptyAgg();
+        const sub = applyCategoricalFiltersToDeptRow(r);
+        stats[dn].cnt += sub.cnt;
+        stats[dn].sg  += sub.sg;
+        stats[dn].sm  += sub.sm;
+        stats[dn].sl  += sub.sl;
+        stats[dn].sc  += sub.sc;
+        stats[dn].ss  += sub.ss;
+        stats[dn].si  += sub.si;
     });
     const result = {};
     Object.entries(stats).forEach(([dn, s]) => {
@@ -574,33 +758,18 @@ function renderGeoLayer() {
  * puntaje por género y estrato cuando los datos dimensionados están disponibles.
  */
 function getDeptoDistrib() {
-    const target = filters.depto ? [filters.depto] : Object.keys(appData.distributions);
+    const active = activeDeptPeriods();
     const agg = { nat:[0,0], area:[0,0], gen:[0,0], str: Array(6).fill(null).map(()=>[0,0]) };
-
-    // Determinar qué periodos corresponden a los filtros de años y semestres
-    const activePeriods = [];
-    rawPeriodFiles.forEach(entry => {
-        const yr = Math.floor(entry.period / 10);
-        const sm = entry.period % 10;
-        if (filters.year_start && yr < filters.year_start) return;
-        if (filters.year_end   && yr > filters.year_end)   return;
-        if (filters.sem && sm !== +filters.sem) return;
-        activePeriods.push(entry.period);
-    });
-
-    target.forEach(dn => {
-        activePeriods.forEach(p => {
-            const periodDist = distributionsByPeriod[p];
-            if (!periodDist) return;
-            const d = periodDist[dn];
-            if (!d) return;
-            agg.nat[0]  += d.nat[0] || 0;  agg.nat[1]  += d.nat[1] || 0;
-            agg.area[0] += d.area[0] || 0; agg.area[1] += d.area[1] || 0;
-            agg.gen[0]  += d.gen[0] || 0;  agg.gen[1]  += d.gen[1] || 0;
-            d.str.forEach((sv, i) => {
-                agg.str[i][0] += sv[0] || 0;
-                agg.str[i][1] += (sv[1] * sv[0]) || 0;
-            });
+    active.forEach(key => {
+        const [pStr, dn] = key.split('|');
+        const d = (distributionsByPeriod[+pStr] || {})[dn];
+        if (!d) return;
+        agg.nat[0]  += d.nat?.[0] || 0;  agg.nat[1]  += d.nat?.[1] || 0;
+        agg.area[0] += d.area?.[0] || 0; agg.area[1] += d.area?.[1] || 0;
+        agg.gen[0]  += d.gen?.[0] || 0;  agg.gen[1]  += d.gen?.[1] || 0;
+        (d.str || []).forEach((sv, i) => {
+            agg.str[i][0] += sv[0] || 0;
+            agg.str[i][1] += ((sv[1] || 0) * (sv[0] || 0));
         });
     });
     return agg;
@@ -801,10 +970,11 @@ function renderTrend() {
     dRows.forEach(r => {
         const pd = r[DC.periodo];
         if (!byPeriod[pd]) byPeriod[pd] = {cnt:0,sg:0,sm:0,sl:0,sc:0,ss:0,si:0};
-        const w = r[DC.count];
-        byPeriod[pd].cnt+=w; byPeriod[pd].sg+=r[DC.avg_global]*w; byPeriod[pd].sm+=r[DC.avg_mat]*w;
-        byPeriod[pd].sl+=r[DC.avg_lec]*w; byPeriod[pd].sc+=r[DC.avg_cna]*w;
-        byPeriod[pd].ss+=r[DC.avg_soc]*w; byPeriod[pd].si+=r[DC.avg_ing]*w;
+        const sub = applyCategoricalFiltersToDeptRow(r);
+        const w = sub.cnt;
+        byPeriod[pd].cnt+=w; byPeriod[pd].sg+=sub.sg; byPeriod[pd].sm+=sub.sm;
+        byPeriod[pd].sl+=sub.sl; byPeriod[pd].sc+=sub.sc;
+        byPeriod[pd].ss+=sub.ss; byPeriod[pd].si+=sub.si;
     });
 
     const periods = Object.keys(byPeriod).sort();
